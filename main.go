@@ -20,7 +20,9 @@ var (
 )
 
 type Config struct {
-	Checks map[string]Answer `json:"checks"`
+	Checks  map[string]Answer `json:"checks"`
+	Timeout uint16            `json:"timeout"`
+	Once    bool              `json:"once"`
 }
 
 type Answer struct {
@@ -38,6 +40,14 @@ type Output struct {
 	Timestamp string `json:"timestamp"`
 }
 
+type OnceSignal struct{}
+
+func (s *OnceSignal) String() string {
+	return "once flag is set"
+}
+
+func (s *OnceSignal) Signal() {}
+
 func main() {
 	if len(os.Args) < 2 {
 		panic("Please provide config file path as first arg")
@@ -49,12 +59,11 @@ func main() {
 		if !strings.HasSuffix(r, ".") {
 			r = r + "."
 		}
-		go check(r, dns.TypeA, a)
+		go check(config, r, dns.TypeA, a)
 	}
 
 	signl := <-exitChan
-	fmt.Print("Received signal: ")
-	fmt.Println(signl)
+	fmt.Printf("{\"type\":\"event\",\"signal\":\"%s\"}\n", signl.String())
 	os.Exit(0)
 }
 
@@ -67,6 +76,9 @@ func setup(confFile string) {
 	err = json.Unmarshal(confContent, config)
 	if err != nil {
 		panic(err)
+	}
+	if config.Timeout < 1 {
+		config.Timeout = 5
 	}
 
 	exitChan = make(chan os.Signal)
@@ -84,7 +96,7 @@ func setup(confFile string) {
 	}
 }
 
-func check(name string, recordType uint16, expected Answer) {
+func check(config *Config, name string, recordType uint16, expected Answer) {
 	signal.Notify(exitChan, syscall.SIGINT, syscall.SIGTERM)
 
 	localm := &dns.Msg{
@@ -94,7 +106,7 @@ func check(name string, recordType uint16, expected Answer) {
 		Question: make([]dns.Question, 1),
 	}
 	localc := &dns.Client{
-		ReadTimeout: 5 * time.Second,
+		ReadTimeout: time.Duration(config.Timeout) * time.Second,
 	}
 	for {
 		localm.SetQuestion(name, recordType)
@@ -112,6 +124,9 @@ func check(name string, recordType uint16, expected Answer) {
 			}
 		}
 
+		if config.Once {
+			exitChan <- &OnceSignal{}
+		}
 		select {
 		case <-exitChan:
 			return
@@ -126,7 +141,7 @@ func output(msg *dns.Msg, err error, expected Answer, checkTime time.Time, durat
 
 	actual := Output{}
 	actual.Timestamp = checkTime.Format(time.RFC3339)
-	actual.Duration = duration/1000 // microseconds
+	actual.Duration = duration / 1000 // microseconds
 	if err != nil {
 		actual.Error = err
 	}

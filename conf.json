@@ -5,7 +5,7 @@
     "www.dbc.dk":                   {"response": "dbcdk-proxy.dbc.dk.", "recordType": "CNAME"},
     "google.com":                   {"response": "*", "recordType": "A"}
   },
-  "timeout": 5,
-  "once": true,
-  "shutdown-delay": 10
+  "timeout": 500,
+  "until": "noerror",
+  "shutdown-delay": 0
 }

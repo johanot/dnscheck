@@ -22,7 +22,7 @@ var (
 type Config struct {
 	Checks  map[string]Answer `json:"checks"`
 	Timeout uint16            `json:"timeout"`
-	Once    bool              `json:"once"`
+	Until   string            `json:"until"`
 	ShutdownDelay uint16      `json:"shutdown-delay"`
 }
 
@@ -42,12 +42,19 @@ type Output struct {
 }
 
 type OnceSignal struct{}
+type NoErrorSignal struct{}
 
 func (s *OnceSignal) String() string {
-	return "once flag is set"
+	return "until 'once' flag is set"
 }
 
 func (s *OnceSignal) Signal() {}
+
+func (s *NoErrorSignal) String() string {
+	return "until 'noerror' flag is set"
+}
+
+func (s *NoErrorSignal) Signal() {}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -74,7 +81,9 @@ func main() {
 	signl := <-exitChan
 	fmt.Printf("{\"type\":\"event\",\"signal\":\"%s\"}\n", signl.String())
 	for _, c := range sChans {
-		c <- signl
+		go func() {
+			c <- signl
+		}()
 	}
 	if _, ok := signl.(*OnceSignal); ok {
 		fmt.Printf("{\"type\":\"info\",\"msg\":\"waiting for shutdown delay: %d\"}\n", config.ShutdownDelay)
@@ -117,8 +126,10 @@ func setup(confFile string) {
 }
 
 func signaller(config *Config, exitChan chan<- os.Signal) {
-	if config.Once {
+	if config.Until == "once" {
 		exitChan <- &OnceSignal{}
+	} else if config.Until == "noerror" {
+		exitChan <- &NoErrorSignal{}
 	}
 }
 
@@ -130,8 +141,10 @@ func check(config *Config, name string, recordType uint16, expected Answer, wg *
 		Question: make([]dns.Question, 1),
 	}
 	localc := &dns.Client{
-		ReadTimeout: time.Duration(config.Timeout) * time.Second,
+		ReadTimeout: time.Duration(config.Timeout) * time.Millisecond,
 	}
+	var shutdown = false
+	var timer = time.Now()
 	for {
 		localm.SetQuestion(name, recordType)
 		for _, server := range dnsConf.Servers {
@@ -145,17 +158,29 @@ func check(config *Config, name string, recordType uint16, expected Answer, wg *
 			}
 			if r == nil || r.Rcode == dns.RcodeNameError || r.Rcode == dns.RcodeSuccess {
 				output(r, err, expected, now, duration)
+				if r != nil && r.Rcode == dns.RcodeSuccess && config.Until == "noerror" {
+					if !shutdown {
+						fmt.Printf("{\"type\":\"event\",\"first-success-after\":\"%s\",\"timestamp\":\"%s\"}\n", time.Since(timer), time.Now().Format(time.RFC3339))
+						shutdown = true
+					}
+				}
 			}
 		}
 
 		select {
-		case <-exitChan:
-			wg.Done()
-			return
+		case s := <-exitChan:
+			if _, ok := s.(*NoErrorSignal); !ok {
+				wg.Done()
+				return
+			}
 		default:
-			delay := time.Duration(rand.Intn(5000)) + 500
-			time.Sleep(delay * time.Millisecond)
+			if shutdown {
+				wg.Done()
+				return
+			}
 		}
+		delay := time.Duration(rand.Intn(5000)) + 500
+		time.Sleep(delay * time.Millisecond)
 	}
 }
 

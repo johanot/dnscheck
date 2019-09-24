@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -16,13 +17,13 @@ import (
 var (
 	dnsConf  *dns.ClientConfig
 	config   *Config
-	exitChan chan os.Signal
 )
 
 type Config struct {
 	Checks  map[string]Answer `json:"checks"`
 	Timeout uint16            `json:"timeout"`
 	Once    bool              `json:"once"`
+	ShutdownDelay uint16      `json:"shutdown-delay"`
 }
 
 type Answer struct {
@@ -53,17 +54,37 @@ func main() {
 		panic("Please provide config file path as first arg")
 	}
 	setup(os.Args[1])
+	var sChans = make([]chan os.Signal, 0)
+	exitChan := make(chan os.Signal)
 	signal.Notify(exitChan, syscall.SIGINT, syscall.SIGTERM)
 
+	wg := &sync.WaitGroup{}
 	for r, a := range config.Checks {
 		if !strings.HasSuffix(r, ".") {
 			r = r + "."
 		}
-		go check(config, r, dns.TypeA, a)
+		wg.Add(1)
+		subChan := make(chan os.Signal)
+		sChans = append(sChans, subChan)
+		go check(config, r, dns.TypeA, a, wg, subChan)
 	}
+
+	go signaller(config, exitChan)
 
 	signl := <-exitChan
 	fmt.Printf("{\"type\":\"event\",\"signal\":\"%s\"}\n", signl.String())
+	for _, c := range sChans {
+		c <- signl
+	}
+	if _, ok := signl.(*OnceSignal); ok {
+		fmt.Printf("{\"type\":\"info\",\"msg\":\"waiting for shutdown delay: %d\"}\n", config.ShutdownDelay)
+		wg.Add(1)
+		go func(wg *sync.WaitGroup) {
+			time.Sleep(time.Duration(config.ShutdownDelay) * time.Second)
+			wg.Done()
+		}(wg)
+	}
+	wg.Wait()
 	os.Exit(0)
 }
 
@@ -81,7 +102,6 @@ func setup(confFile string) {
 		config.Timeout = 5
 	}
 
-	exitChan = make(chan os.Signal)
 	dnsConf, err = dns.ClientConfigFromFile("/etc/resolv.conf")
 	if err != nil {
 		panic(err)
@@ -96,9 +116,13 @@ func setup(confFile string) {
 	}
 }
 
-func check(config *Config, name string, recordType uint16, expected Answer) {
-	signal.Notify(exitChan, syscall.SIGINT, syscall.SIGTERM)
+func signaller(config *Config, exitChan chan<- os.Signal) {
+	if config.Once {
+		exitChan <- &OnceSignal{}
+	}
+}
 
+func check(config *Config, name string, recordType uint16, expected Answer, wg *sync.WaitGroup, exitChan <-chan os.Signal) {
 	localm := &dns.Msg{
 		MsgHdr: dns.MsgHdr{
 			RecursionDesired: true,
@@ -124,11 +148,9 @@ func check(config *Config, name string, recordType uint16, expected Answer) {
 			}
 		}
 
-		if config.Once {
-			exitChan <- &OnceSignal{}
-		}
 		select {
 		case <-exitChan:
+			wg.Done()
 			return
 		default:
 			delay := time.Duration(rand.Intn(5000)) + 500

@@ -1,0 +1,11 @@
+{
+  "checks": {
+    "db.tickle.dataio.prod.dbc.dk": {"response": "172.20.6.31", "recordType": "A"},
+    "socl-p01.dbc.dk":              {"response": "172.20.1.237", "recordType": "A"},
+    "www.dbc.dk":                   {"response": "dbcdk-proxy.dbc.dk.", "recordType": "CNAME"},
+    "google.com":                   {"response": "*", "recordType": "A"}
+  },
+  "timeout": 5,
+  "once": true,
+  "shutdown-delay": 10
+}
